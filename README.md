@@ -9,14 +9,16 @@ Full requirements are in `ai_engineer_assessment_v2.2 (1) (2026).pdf` in the rep
 
 ## Current state
 
-This is early-stage. Only the Superhero API client exists so far (`sources/superhero.py`); the
-FastAPI app, dataset/classification logic, and tests have not been built yet. See
-[PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for feature status and design decisions.
+The FastAPI app (`main.py`) has one working endpoint, `POST /ask`, but it only forwards the
+question straight to Gemini for now — there's no dataset or superhero-lookup routing wired in
+yet, and no classification step. See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for feature
+status and design decisions.
 
 ## Requirements
 
 - Python 3.10+
 - A [Superhero API](https://superheroapi.com/) access token
+- A [Google Gemini AI Studio](https://aistudio.google.com/) API key
 
 ## Setup
 
@@ -33,20 +35,37 @@ FastAPI app, dataset/classification logic, and tests have not been built yet. Se
    GEMINI_API_KEY=your_gemini_api_key
    ```
 
-   `SUPERHERO_API_TOKEN` is required. `GEMINI_API_KEY` is reserved for the upcoming LLM
-   classification/answering step and isn't used by any code yet.
+   Both are required.
 
-## Running
-
-There is no FastAPI app yet. The only runnable piece today is the Superhero API client's demo
-call:
+## Running the API
 
 ```bash
-python sources/superhero.py
+uvicorn main:app --reload
 ```
 
-This looks up "Batman" via the Superhero API and prints a compact context string built from all
-matching heroes.
+Then send a question:
+
+```bash
+curl -X POST http://127.0.0.1:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the capital of France?"}'
+```
+
+```json
+{"answer": "The capital of France is Paris.", "sources": [{"type": "gemini", "detail": "..."}]}
+```
+
+An empty question returns `400` with a clear error instead of a crash. You can also try it from
+the browser via the auto-generated docs at http://127.0.0.1:8000/docs.
+
+## Running the individual clients
+
+Each building block also has its own demo call, useful for testing it in isolation:
+
+```bash
+python sources/superhero.py     # looks up "Batman", prints a compact context string
+python services/gemini.py       # sends one prompt to Gemini, prints the answer
+```
 
 ## Testing
 

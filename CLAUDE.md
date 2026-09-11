@@ -15,15 +15,17 @@ is added or a design decision changes, rather than duplicating that info here.
 
 ## Current state
 
-The project is early-stage. Only the Superhero API client exists so far
-(`sources/superhero.py`); the FastAPI app, dataset/classification logic, and tests have not been
-built yet.
+`main.py` runs a FastAPI app with one endpoint, `POST /ask`, but it currently just forwards the
+question straight to Gemini and returns the answer — no dataset/superhero routing or
+classification step yet, even though `sources/superhero.py` exists and is ready to be wired in.
 
 ## Commands
 
 ```bash
-pip install -r requirements.txt      # install deps (requests, python-dotenv)
+pip install -r requirements.txt      # install deps (requests, python-dotenv, google-genai, fastapi, uvicorn)
+uvicorn main:app --reload            # run the API (POST /ask); docs at /docs
 python sources/superhero.py          # run the Superhero API client's demo call directly
+python services/gemini.py            # run the Gemini client's demo call directly
 ```
 
 There is no test suite yet.
@@ -31,8 +33,13 @@ There is no test suite yet.
 ## Architecture
 
 - **Config/secrets**: loaded from a root-level `.env` (gitignored) via `python-dotenv`.
-  `SUPERHERO_API_TOKEN` is required; `GEMINI_API_KEY` is reserved for the LLM calls (Google
-  Gemini AI Studio) but not yet used in code.
+  `SUPERHERO_API_TOKEN` and `GEMINI_API_KEY` (Google Gemini AI Studio) are both required now.
+- **`main.py`**: FastAPI app, single `POST /ask` route. Validates `question` is non-empty (400 if
+  not), calls `services.gemini.call_gemini` (502 on failure), and returns `{"answer": ...,
+  "sources": [...]}`. Right now it always answers from Gemini's own knowledge with no retrieval —
+  the `sources` entry says so explicitly (`type: "gemini"`) rather than pretending otherwise.
+  Wiring in `sources/superhero.py` and a local dataset behind an actual classification step is
+  the next planned increment (see below).
 - **`sources/superhero.py`**: `search_hero(name)` wraps `GET
   https://superheroapi.com/api/{token}/search/{name}`, returning the API's `results` list — a
   name can match several heroes, so this always returns a list rather than assuming one match. It
@@ -41,6 +48,11 @@ There is no test suite yet.
   "no such hero" from "the API is unavailable" rather than letting either crash the request.
   `build_hero_context(results)` turns that list into one compact string (name, publisher, full
   name, alignment, powerstats per hero) meant to be dropped straight into an LLM prompt later.
+- **`services/gemini.py`**: the only file that knows Gemini exists. `_get_client()` builds the
+  `google.genai.Client` once (`@lru_cache`) instead of per request. `call_gemini(system_prompt,
+  user_message) -> str` is the single entry point every other module should use — swapping LLM
+  providers later means changing only this file. Uses model `gemini-3.6-flash` (`gemini-2.5-flash`
+  was retired for new users mid-build; keep an eye on Google's model deprecation notices).
 
 ## Planned design (not yet implemented)
 
