@@ -16,14 +16,14 @@ is added or a design decision changes, rather than duplicating that info here.
 ## Current state
 
 The project is early-stage. Only the Superhero API client exists so far
-(`api_source/data.py`); the FastAPI app, dataset/classification logic, and tests have not been
+(`sources/superhero.py`); the FastAPI app, dataset/classification logic, and tests have not been
 built yet.
 
 ## Commands
 
 ```bash
 pip install -r requirements.txt      # install deps (requests, python-dotenv)
-python api_source/data.py            # run the Superhero API client's demo call directly
+python sources/superhero.py          # run the Superhero API client's demo call directly
 ```
 
 There is no test suite yet.
@@ -33,11 +33,14 @@ There is no test suite yet.
 - **Config/secrets**: loaded from a root-level `.env` (gitignored) via `python-dotenv`.
   `SUPERHERO_API_TOKEN` is required; `GEMINI_API_KEY` is reserved for the LLM calls (Google
   Gemini AI Studio) but not yet used in code.
-- **`api_source/data.py`**: `search_hero(name)` wraps `GET
-  https://superheroapi.com/api/{token}/search/{name}`, returning the API's `results` list. It
+- **`sources/superhero.py`**: `search_hero(name)` wraps `GET
+  https://superheroapi.com/api/{token}/search/{name}`, returning the API's `results` list — a
+  name can match several heroes, so this always returns a list rather than assuming one match. It
   raises `SuperheroNotFoundError` when the API reports no match, and `SuperheroAPIError` for
   network/timeout/non-200/malformed-JSON failures — callers should catch these to distinguish
   "no such hero" from "the API is unavailable" rather than letting either crash the request.
+  `build_hero_context(results)` turns that list into one compact string (name, publisher, full
+  name, alignment, powerstats per hero) meant to be dropped straight into an LLM prompt later.
 
 ## Planned design (not yet implemented)
 

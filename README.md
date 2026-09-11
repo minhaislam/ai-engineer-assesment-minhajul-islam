@@ -9,7 +9,7 @@ Full requirements are in `ai_engineer_assessment_v2.2 (1) (2026).pdf` in the rep
 
 ## Current state
 
-This is early-stage. Only the Superhero API client exists so far (`api_source/data.py`); the
+This is early-stage. Only the Superhero API client exists so far (`sources/superhero.py`); the
 FastAPI app, dataset/classification logic, and tests have not been built yet. See
 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for feature status and design decisions.
 
@@ -42,10 +42,11 @@ There is no FastAPI app yet. The only runnable piece today is the Superhero API 
 call:
 
 ```bash
-python api_source/data.py
+python sources/superhero.py
 ```
 
-This looks up "Superman" via the Superhero API and prints the matching results.
+This looks up "Batman" via the Superhero API and prints a compact context string built from all
+matching heroes.
 
 ## Testing
 
