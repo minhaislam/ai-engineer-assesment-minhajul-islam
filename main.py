@@ -1,52 +1,21 @@
 """FastAPI chatbot: single POST /ask endpoint.
 
-For now this just forwards the question straight to Gemini and returns its answer — it proves
-the HTTP -> LLM wiring end-to-end. Routing to the superhero API / local dataset, and the
-classify-then-answer flow, come in a later step (see PROJECT_OVERVIEW.md).
+Request arrives -> validated by models/schemas.py (AskRequest) -> core/router.py classifies
+the intent, fetches context from the right source(s), and answers it. See PROJECT_OVERVIEW.md
+for the full data flow.
 """
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 
-from services.gemini import call_gemini
+from core.router import handle_question
+from models.schemas import AskRequest, AskResponse
 
 app = FastAPI(title="Superhero Chatbot")
 
-SYSTEM_PROMPT = "You are a helpful assistant. Answer the user's question directly and concisely."
-
-
-class AskRequest(BaseModel):
-    question: str
-
-
-class Source(BaseModel):
-    type: str
-    detail: str
-
-
-class AskResponse(BaseModel):
-    answer: str
-    sources: list[Source]
-
 
 @app.post("/ask", response_model=AskResponse)
-def ask(request: AskRequest) -> AskResponse:
-    question = request.question.strip()
-
-    if not question:
-        raise HTTPException(status_code=400, detail="question must not be empty")
-
+async def ask(request: AskRequest) -> AskResponse:
     try:
-        answer = call_gemini(system_prompt=SYSTEM_PROMPT, user_message=question)
+        return await handle_question(request.question)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}") from exc
-
-    return AskResponse(
-        answer=answer,
-        sources=[
-            Source(
-                type="gemini",
-                detail="Answered directly from the LLM's own general knowledge (no retrieval yet)",
-            )
-        ],
-    )
+        raise HTTPException(status_code=502, detail=f"Failed to answer question: {exc}") from exc

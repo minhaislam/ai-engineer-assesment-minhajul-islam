@@ -15,9 +15,10 @@ is added or a design decision changes, rather than duplicating that info here.
 
 ## Current state
 
-`main.py` runs a FastAPI app with one endpoint, `POST /ask`, but it currently just forwards the
-question straight to Gemini and returns the answer — no dataset/superhero routing or
-classification step yet, even though `sources/superhero.py` exists and is ready to be wired in.
+The full pipeline is wired up: `main.py`'s `POST /ask` validates the request, then
+`core/router.py` classifies intent, fetches context from the right source(s), and answers from
+that context only. Not yet built: tests, and a cap on how many hero names/matches a single
+question can pull into the prompt.
 
 ## Commands
 
@@ -26,20 +27,47 @@ pip install -r requirements.txt      # install deps (requests, python-dotenv, go
 uvicorn main:app --reload            # run the API (POST /ask); docs at /docs
 python sources/superhero.py          # run the Superhero API client's demo call directly
 python services/gemini.py            # run the Gemini client's demo call directly
+python sources/dataset.py            # run the dataset keyword-search demo call directly
 ```
 
 There is no test suite yet.
 
 ## Architecture
 
+Request flow: `main.py` → `models/schemas.py` (validation) → `core/router.py` →
+`core/intent.py` (classify) → `sources/superhero.py` and/or `sources/dataset.py` (retrieve) →
+`core/responder.py` (answer) → back to `main.py`. Full diagram in `PROJECT_OVERVIEW.md`.
+
 - **Config/secrets**: loaded from a root-level `.env` (gitignored) via `python-dotenv`.
   `SUPERHERO_API_TOKEN` and `GEMINI_API_KEY` (Google Gemini AI Studio) are both required now.
-- **`main.py`**: FastAPI app, single `POST /ask` route. Validates `question` is non-empty (400 if
-  not), calls `services.gemini.call_gemini` (502 on failure), and returns `{"answer": ...,
-  "sources": [...]}`. Right now it always answers from Gemini's own knowledge with no retrieval —
-  the `sources` entry says so explicitly (`type: "gemini"`) rather than pretending otherwise.
-  Wiring in `sources/superhero.py` and a local dataset behind an actual classification step is
-  the next planned increment (see below).
+- **`models/schemas.py`**: `AskRequest` (question, 1-500 chars, blank-after-strip rejected) and
+  `AskResponse` (`answer: str`, `sources: list[str]`, `intent: str`) — the contract everything
+  else builds on.
+- **`prompts/intent_system.txt`** / **`prompts/answer_system.txt`**: system prompts as plain text
+  files (not Python strings) so they can be tuned without touching code. Loaded fresh on every
+  call — no caching, since re-reading a small text file is negligible and it means a prompt edit
+  takes effect without restarting the server.
+- **`main.py`**: FastAPI app, single `POST /ask` route. Delegates everything to
+  `core.router.handle_question`; catches any exception and returns 502 with the real reason
+  (rather than a raw traceback) so a Gemini outage/rate-limit or Superhero API outage fails
+  cleanly. Field-level validation (empty/too-long question) is handled by `AskRequest` itself and
+  surfaces as FastAPI's standard 422.
+- **`core/intent.py`**: `classify_intent(question)` loads `prompts/intent_system.txt`, calls
+  Gemini, and parses a `{"intent": "..."}` JSON reply into one of `dataset`/`superhero`/`both`.
+  Falls back to `"both"` if the reply can't be parsed, rather than crashing the request.
+- **`core/router.py`**: the orchestrator. Calls `classify_intent`, then fetches context from the
+  matching source(s) — `"both"` runs superhero + dataset lookups concurrently via
+  `asyncio.gather`/`asyncio.to_thread` since both are blocking I/O. For superhero questions it
+  runs a small extra Gemini call first (`HERO_EXTRACT_SYSTEM_PROMPT`, inline in this file, not a
+  separate prompt file) to pull hero name(s) out of the free-form question, since
+  `search_hero()` needs an actual name, not a whole sentence — reuses the design validated in
+  `scripts/test_superhero_gemini.py`. Combines whatever context came back (or a "no relevant
+  information" fallback if nothing did) and calls `core.responder.generate_answer`, then sets
+  `intent` on the returned `AskResponse` before handing it back to `main.py`.
+- **`core/responder.py`**: `generate_answer(question, context, sources)` loads
+  `prompts/answer_system.txt`, calls Gemini with the question + context + source labels, and
+  returns an `AskResponse` (with `intent` left blank — `router.py` fills that in, since responder
+  doesn't know it).
 - **`sources/superhero.py`**: `search_hero(name)` wraps `GET
   https://superheroapi.com/api/{token}/search/{name}`, returning the API's `results` list — a
   name can match several heroes, so this always returns a list rather than assuming one match. It
@@ -48,26 +76,42 @@ There is no test suite yet.
   "no such hero" from "the API is unavailable" rather than letting either crash the request.
   `build_hero_context(results)` turns that list into one compact string (name, publisher, full
   name, alignment, powerstats per hero) meant to be dropped straight into an LLM prompt later.
+- **`sources/dataset.py`** + **`data/football.txt`**: `load_dataset()` reads the dataset file
+  once (`@lru_cache`) and splits it into one fact per line; assumes the process runs from the
+  repo root, same as the other scripts. `search_dataset(question)` scores each line by keyword
+  overlap with the question (a small stopword list — "the", "is", "what", etc. — is stripped
+  first so common words don't inflate every line's score) and returns the top 5 lines joined into
+  one string, or `""` if nothing overlaps. Plain keyword matching, no embeddings/vector DB, per
+  the "Dataset retrieval" decision below.
 - **`services/gemini.py`**: the only file that knows Gemini exists. `_get_client()` builds the
   `google.genai.Client` once (`@lru_cache`) instead of per request. `call_gemini(system_prompt,
   user_message) -> str` is the single entry point every other module should use — swapping LLM
   providers later means changing only this file. Uses model `gemini-3.6-flash` (`gemini-2.5-flash`
   was retired for new users mid-build; keep an eye on Google's model deprecation notices).
 
-## Planned design (not yet implemented)
+## Design decisions (implemented)
 
-Agreed direction for the rest of the build, kept here so it isn't re-litigated from scratch:
+- **Two/three-stage LLM flow**: a cheap Gemini call classifies each question as `dataset`,
+  `superhero`, or `both`; for superhero questions, another cheap call extracts hero name(s) from
+  the free-form question; a final Gemini call produces the answer from whatever context was
+  retrieved. Kept as separate calls (not combined) so each step is unit-testable in isolation.
+- **Dataset retrieval**: a small curated text file (`data/football.txt`), searched with plain
+  keyword-overlap matching — no embeddings or vector DB.
+- **Response shape**: `{"answer": ..., "sources": [...], "intent": "..."}` — `sources` is a flat
+  `list[str]` of human-readable labels (e.g. `"superhero_api: Batman"`, `"dataset: football
+  facts"`), not free prose, so citation is testable; `intent` exposes the classifier's decision
+  for debugging/observability.
 
-- **Two-stage LLM flow**: a cheap Gemini call classifies each question as `dataset`, `superhero`,
-  or `both` (plus extracted hero name(s) for superhero questions) before any retrieval happens;
-  a second Gemini call produces the final answer from whatever context was retrieved. Kept as two
-  calls (not combined) specifically so classification is unit-testable in isolation.
-- **Dataset retrieval**: a small curated set of local text/markdown files, searched with simple
-  keyword/BM25-style matching — no embeddings or vector DB.
-- **Response shape**: `{"answer": ..., "sources": [{"type": "superhero_api"|"dataset", "detail":
-  ...}]}` — sources are a structured field, not just prose, so citation is testable.
+## Not yet built / known limitations
+
 - **Test scope**: routing/classification is the must-have core, plus a couple of error-path tests
   (empty input, superhero-not-found) since "sensible error handling" is explicit in the
-  assessment's grading bar.
+  assessment's grading bar. No tests exist yet.
+- **No cap on fan-out**: a question naming many heroes, or a name with many API matches, grows
+  the prompt with no limit. Fine for a single-user assessment demo, worth capping for real use.
+- **Free-tier Gemini quota**: `gemini-3.6-flash`'s free tier is only 20 requests/day, and this
+  pipeline uses 2-3 calls per question (classify, optional hero-name extraction, answer) — it's
+  easy to exhaust during a normal test session. A 429 surfaces as a clean 502 from `main.py`
+  rather than crashing, but be aware of it when demoing.
 - **Scope is intentionally minimal**: no Docker, no CI — matches the assessment's "80-90%
   production-ready," not gold-plated.

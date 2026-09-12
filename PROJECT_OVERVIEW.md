@@ -6,29 +6,89 @@ API, routing via LLM classification, with sources cited in every response. Asses
 
 ## Current features
 
-- FastAPI app (`main.py`), `POST /ask`: validates the question is non-empty (400 if not), calls
-  Gemini, returns `{"answer": ..., "sources": [...]}`. **Gemini-only for now** — no dataset or
-  superhero-lookup routing wired in yet, so every response cites `"type": "gemini"` and is
-  answered from the model's own general knowledge. This was a deliberate, scoped-down first cut
-  to prove the HTTP → LLM path end-to-end before adding retrieval.
-- Superhero API client (`sources/superhero.py`): `search_hero(name)` returns all matching heroes
-  for a name (a search can match several, e.g. "Batman" returns 3 distinct heroes), with distinct
-  not-found vs. API-error handling. `build_hero_context(results)` compacts those results into a
-  single string for later use as LLM prompt context. Not yet called from `main.py`.
-- Gemini LLM client (`services/gemini.py`): the only file that talks to Gemini. Client is built
-  once via `@lru_cache`, not per request. Exposes one function, `call_gemini(system_prompt,
-  user_message) -> str`, so swapping providers later means touching one file.
+The full pipeline is wired up end-to-end:
 
-## Not yet built
+```
+main.py (POST /ask)
+  -> models/schemas.py validates the request (AskRequest)
+  -> core/router.py: handle_question(question)
+       -> core/intent.py: classify_intent(question) -> "dataset" | "superhero" | "both"
+       -> calls the matching source(s):
+            sources/superhero.py  (extract hero name(s) via Gemini, then search_hero + build_hero_context)
+            sources/dataset.py    (search_dataset: keyword overlap)
+          "both" runs the two concurrently (asyncio.gather + asyncio.to_thread)
+       -> core/responder.py: generate_answer(question, context, sources) -> AskResponse
+       -> router.py sets response.intent before returning
+  -> main.py returns the AskResponse (502 on any failure, with the real reason)
+```
 
-- Superhero-lookup routing and local dataset retrieval wired into `POST /ask`
-- Local text dataset + keyword/BM25 search
-- Gemini classify step (dataset / superhero / both) and answer step, built on top of `call_gemini`
-- Structured multi-type `sources` field (currently always just `"gemini"`)
-- Tests (routing, error paths)
+- `models/schemas.py`: `AskRequest` (question, 1-500 chars, rejects blank-after-strip via a
+  `field_validator`) and `AskResponse` (`answer: str`, `sources: list[str]`, `intent: str`).
+- `prompts/intent_system.txt` and `prompts/answer_system.txt`: system prompts as text files, not
+  Python strings, so they're editable without a code change or restart.
+- `core/intent.py`: one Gemini call, parses `{"intent": "..."}` JSON, falls back to `"both"` on
+  an unparseable reply instead of crashing.
+- `core/router.py`: the orchestrator. Superhero questions get an extra inline Gemini call (hero
+  name extraction from free text — same design validated in `scripts/test_superhero_gemini.py`)
+  before `search_hero()` can run.
+- `core/responder.py`: builds the final answer, telling Gemini to use *only* the given context,
+  plus a `Sources:` line at the end of the answer text itself, in addition to the structured
+  `sources` list.
+- Superhero API client (`sources/superhero.py`) and local dataset (`sources/dataset.py` +
+  `data/football.txt`) — see their entries further down for how each works; both are now called
+  from `main.py` via the router instead of standalone.
+- Gemini LLM client (`services/gemini.py`) — unchanged, still the only file that knows Gemini
+  exists.
+- Manual test script (`scripts/test_superhero_gemini.py`) — the design prototype for the
+  superhero half of `core/router.py`; still useful standalone for testing just that piece.
+
+## Not yet built / known limitations
+
+- Tests (routing, error paths) — the assessment's explicit "sensible error handling" bar wants
+  at least empty-input and superhero-not-found covered.
+- No cap on fan-out: a question naming many heroes, or an ambiguous name with many API matches,
+  grows the prompt with no limit.
+- `gemini-3.6-flash`'s free tier is 20 requests/day, and each question costs 2-3 calls (classify,
+  optional hero extraction, answer) — easy to exhaust during a test session. See the update-log
+  entry below.
 
 ## Update log
 
+- **2026-09-12** — Wired the full pipeline together: `models/schemas.py` (`AskRequest`/
+  `AskResponse`), `prompts/intent_system.txt` + `prompts/answer_system.txt`, and
+  `core/{intent,router,responder}.py`. `main.py` now delegates entirely to
+  `core.router.handle_question` instead of calling Gemini directly. Verified live for the
+  `"dataset"` path: "Who won the first FIFA World Cup?" → correct intent, correct answer, correct
+  citation both in the answer text and the structured `sources` field. Verification of the
+  `"superhero"` and `"both"` paths was cut short by hitting Gemini's free-tier quota (20
+  requests/day for `gemini-3.6-flash`) partway through — the 429 came back as a clean 502 from
+  `main.py`, confirming the error handling works, but live-testing those two paths (and the
+  edge cases: >500 char question, ambiguous multi-hero "both" question) is still pending a quota
+  reset or a different key.
+- **2026-09-12** — Added the local dataset: `data/football.txt` (~25 curated football/soccer
+  facts, one per line) and `sources/dataset.py` with `load_dataset()` (cached, reads the file
+  once) and `search_dataset(question)` (keyword-overlap scoring, stopwords stripped, top 5 lines
+  joined into one string). Verified live: "Who won the first World Cup?" surfaces the exact
+  Uruguay-1930 line first; "What is the offside rule?" returns just the one line that actually
+  defines it; a fully unrelated question ("capital of France?") correctly returns an empty
+  string rather than forcing irrelevant lines into the context.
+- **2026-09-12** — Extended `scripts/test_superhero_gemini.py` to a full two-stage flow:
+  `extract_hero_names()` (a Gemini call) pulls out zero, one, or multiple hero names from a
+  free-form question, then `gather_hero_context()` looks each up and combines results before the
+  final answer call. Handles the cases discussed: "difference between Batman and Superman" →
+  extracts both names, fetches both, produces a real comparison; "tell me about Superman" (2
+  matches incl. Cyborg Superman) → all matches included, Gemini addresses the ambiguity instead
+  of guessing; a question with no hero mentioned → extraction correctly returns none; a
+  hero-styled but fake name ("Captain Nonexistentman") → extracted, then `search_hero` correctly
+  reports not-found and Gemini relays that honestly. This is the design intended for `main.py`'s
+  `/ask`, pending final review before wiring it in.
+- **2026-09-12** — Added `scripts/test_superhero_gemini.py`, a manual script that passes
+  `build_hero_context()` output into `call_gemini()` alongside a question, to sanity-check the
+  combination before wiring it into `main.py`. Verified live: "Batman" (3 matches) → Gemini
+  correctly notes strengths/weaknesses aren't in the data; "Superman" (2 matches, including
+  Cyborg Superman) → Gemini answers for both rather than guessing which one was meant; a
+  nonsense name fails at the `search_hero` step with `SuperheroNotFoundError`, never reaching
+  Gemini.
 - **2026-09-12** — Added the FastAPI app (`main.py`) with `POST /ask`. Scoped down deliberately:
   it forwards the question straight to `call_gemini` and returns the answer, with no
   dataset/superhero routing yet (confirmed with the user this is a follow-up step). Empty-question

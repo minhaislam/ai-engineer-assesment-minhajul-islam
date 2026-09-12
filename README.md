@@ -9,10 +9,10 @@ Full requirements are in `ai_engineer_assessment_v2.2 (1) (2026).pdf` in the rep
 
 ## Current state
 
-The FastAPI app (`main.py`) has one working endpoint, `POST /ask`, but it only forwards the
-question straight to Gemini for now — there's no dataset or superhero-lookup routing wired in
-yet, and no classification step. See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for feature
-status and design decisions.
+The FastAPI app (`main.py`) has one working endpoint, `POST /ask`. It classifies the question
+(football dataset / superhero API / both), fetches context from the right source(s), and answers
+from that context only, citing sources. See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for the
+full data flow and design decisions.
 
 ## Requirements
 
@@ -48,15 +48,26 @@ Then send a question:
 ```bash
 curl -X POST http://127.0.0.1:8000/ask \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is the capital of France?"}'
+  -d '{"question": "Who won the first FIFA World Cup?"}'
 ```
 
 ```json
-{"answer": "The capital of France is Paris.", "sources": [{"type": "gemini", "detail": "..."}]}
+{
+  "answer": "Uruguay won the first FIFA World Cup in 1930.\n\nSources: dataset: football facts",
+  "sources": ["dataset: football facts"],
+  "intent": "dataset"
+}
 ```
 
-An empty question returns `400` with a clear error instead of a crash. You can also try it from
-the browser via the auto-generated docs at http://127.0.0.1:8000/docs.
+Ask about a superhero instead ("What are Batman's powerstats?") and it routes to the Superhero
+API; ask something that needs both, and it fetches from both sources concurrently. An empty or
+>500-character question returns `422` with a clear validation error instead of a crash; a Gemini
+or Superhero API failure returns `502` with the real reason. You can also try it from the browser
+via the auto-generated docs at http://127.0.0.1:8000/docs.
+
+**Note:** Gemini's free tier caps `gemini-3.6-flash` at 20 requests/day, and each question here
+costs 2-3 calls (classify, optional hero-name extraction, answer) — it's easy to hit that limit
+during a test session. A 429 from Gemini surfaces as a `502` from `/ask`, not a crash.
 
 ## Running the individual clients
 
@@ -65,6 +76,7 @@ Each building block also has its own demo call, useful for testing it in isolati
 ```bash
 python sources/superhero.py     # looks up "Batman", prints a compact context string
 python services/gemini.py       # sends one prompt to Gemini, prints the answer
+python sources/dataset.py       # keyword-searches data/football.txt, prints the top matches
 ```
 
 ## Testing
