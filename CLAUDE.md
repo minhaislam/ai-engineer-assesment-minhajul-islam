@@ -54,7 +54,10 @@ Request flow: `main.py` → `models/schemas.py` (validation) → `core/router.py
   surfaces as FastAPI's standard 422.
 - **`core/intent.py`**: `classify_intent(question)` loads `prompts/intent_system.txt`, calls
   Gemini, and parses a `{"intent": "..."}` JSON reply into one of `dataset`/`superhero`/`both`.
-  Falls back to `"both"` if the reply can't be parsed, rather than crashing the request.
+  Falls back to `"both"` if the reply can't be parsed, rather than crashing the request. The
+  prompt doesn't hardcode the dataset's topic — a `<<DATASET_SAMPLE>>` placeholder is filled in
+  with the first 5 lines of `sources.dataset.load_dataset()` at call time, so the classifier
+  always sees what the dataset actually contains rather than a description that can go stale.
 - **`core/router.py`**: the orchestrator. Calls `classify_intent`, then fetches context from the
   matching source(s) — `"both"` runs superhero + dataset lookups concurrently via
   `asyncio.gather`/`asyncio.to_thread` since both are blocking I/O. For superhero questions it

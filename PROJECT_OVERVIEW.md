@@ -27,7 +27,10 @@ main.py (POST /ask)
 - `prompts/intent_system.txt` and `prompts/answer_system.txt`: system prompts as text files, not
   Python strings, so they're editable without a code change or restart.
 - `core/intent.py`: one Gemini call, parses `{"intent": "..."}` JSON, falls back to `"both"` on
-  an unparseable reply instead of crashing.
+  an unparseable reply instead of crashing. The prompt doesn't hardcode the dataset's topic —
+  it shows the classifier a live sample of `sources.dataset.load_dataset()` (first 5 lines,
+  substituted into the `<<DATASET_SAMPLE>>` placeholder in `prompts/intent_system.txt`), so
+  swapping `data/football.txt` for a different file doesn't require editing the prompt by hand.
 - `core/router.py`: the orchestrator. Superhero questions get an extra inline Gemini call (hero
   name extraction from free text — same design validated in `scripts/test_superhero_gemini.py`)
   before `search_hero()` can run.
@@ -54,6 +57,18 @@ main.py (POST /ask)
 
 ## Update log
 
+- **2026-09-12** — Fixed a coupling issue in `prompts/intent_system.txt`: it used to hardcode
+  "football (soccer) facts" as the dataset's topic, which would silently go stale if
+  `data/football.txt` were ever swapped for a different dataset. `core/intent.py` now injects a
+  live sample (first 5 lines of `load_dataset()`) into a `<<DATASET_SAMPLE>>` placeholder in the
+  prompt instead. Verified: the constructed prompt correctly contains real dataset lines with no
+  leftover placeholder, and `classify_intent()` still returns the right label for
+  dataset/superhero/both questions (tested via `gemini-3.5-flash-lite` while `3.6-flash`'s quota
+  was still exhausted — see below).
+- **2026-09-12** — Discovered `gemini-2.5-flash-lite` is also retired for new API keys (404, same
+  as `gemini-2.5-flash` earlier) — not a quota issue, the model is simply unavailable. Confirmed
+  `gemini-3.5-flash-lite` works and draws from a separate quota than `gemini-3.6-flash`, so it's
+  a viable fallback for testing while the primary model's daily quota is exhausted.
 - **2026-09-12** — Wired the full pipeline together: `models/schemas.py` (`AskRequest`/
   `AskResponse`), `prompts/intent_system.txt` + `prompts/answer_system.txt`, and
   `core/{intent,router,responder}.py`. `main.py` now delegates entirely to
