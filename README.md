@@ -28,12 +28,16 @@ GEMINI_MODEL=gemini-3.6-flash
 ## 2. Run the setup script
 
 ```bash
-./init.sh
+source ./init.sh
 ```
 
 This checks your OS and Python version, creates a `.venv` virtual environment, installs
 `requirements.txt` into it, and verifies the three variables above are set — printing the
-result of each step. Then activate the environment it created:
+result of each step. Because it's run with `source`, it also activates the environment it
+created in your current shell once setup finishes, so there's no separate activation step.
+
+If you run it as `./init.sh` instead (without `source`), it does the same setup but can't
+activate the venv in your shell — activate it yourself afterward:
 
 ```bash
 # Windows

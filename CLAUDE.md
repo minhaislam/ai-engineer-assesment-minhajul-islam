@@ -45,8 +45,14 @@ Request flow: `main.py` → `models/schemas.py` (validation) → `core/router.py
   `python -m pip` (not the system one), and parses `.env` itself (a minimal inline parser, not
   `python-dotenv`, for the same "must run before deps exist" reason) to confirm
   `SUPERHERO_API_TOKEN`/`GEMINI_API_KEY`/`DATASET_PATH` are all set. Prints each step's result.
-  Does not activate the venv or start the server — cross-process activation isn't possible, so
-  those remain manual steps (see `README.md`).
+  Detects whether it's being sourced (`source ./init.sh`) vs executed (`./init.sh`) via the
+  `(return 0 2>/dev/null)` idiom: sourcing runs in the caller's own shell process, so it's the
+  only form that can activate the venv directly for the caller, which `main()` does at the end
+  when sourced (executing still can't — cross-process activation isn't possible — so that path
+  keeps printing manual instructions, see `README.md`). Because sourcing must never let an
+  error tear down the caller's interactive shell, the script intentionally omits `set -e` and
+  instead checks each command explicitly, propagating failure via `return 1` up through `main`;
+  starting the server remains a manual step either way.
 - **Config/secrets**: loaded from a root-level `.env` (gitignored) via `python-dotenv`.
   `SUPERHERO_API_TOKEN`, `GEMINI_API_KEY`, and `DATASET_PATH` are all required now. `GEMINI_MODEL`
   is optional — unset falls back to `gemini-3.6-flash` in `services/gemini.py` — so swapping

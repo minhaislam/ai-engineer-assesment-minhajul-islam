@@ -6,8 +6,27 @@
 # python3, since it has to work before requirements.txt is installed):
 #
 #     ./init.sh
+#
+# Or source it to also activate the venv in your current shell once setup finishes, instead
+# of activating it yourself afterward:
+#
+#     source ./init.sh
 
-set -euo pipefail
+# Detect whether this script is being sourced (`source ./init.sh` / `. ./init.sh`) rather than
+# executed (`./init.sh` / `bash init.sh`). Sourcing runs in the caller's own shell process, so
+# it's the only form that can activate the venv directly in the caller's shell (see the end of
+# main()) - executing runs in a subprocess, so any activation there would be lost the moment
+# the subprocess exits.
+if (return 0 2>/dev/null); then
+    SOURCED=1
+else
+    SOURCED=0
+fi
+
+# No `set -e`: under sourcing, errexit would tear down the caller's interactive shell on the
+# first failing command instead of just stopping this script. Every step below checks its own
+# commands explicitly and returns/exits on failure instead, so behavior is identical either way.
+set -uo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$BASE_DIR/.venv"
@@ -33,7 +52,7 @@ find_python() {
         fi
     done
     echo "ERROR: no working python3/python found on PATH." >&2
-    exit 1
+    return 1
 }
 
 check_os() {
@@ -43,15 +62,18 @@ check_os() {
 
 check_python_version() {
     step 2 "Checking Python version"
-    PYTHON_BIN="$(find_python)"
+    PYTHON_BIN="$(find_python)" || return 1
     local version major minor
-    version="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+    version="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')" || {
+        echo "  ERROR: failed to run $PYTHON_BIN."
+        return 1
+    }
     echo "  Detected: Python $version"
     major="${version%%.*}"
     minor="${version##*.}"
     if [ "$major" -lt "$MIN_PYTHON_MAJOR" ] || { [ "$major" -eq "$MIN_PYTHON_MAJOR" ] && [ "$minor" -lt "$MIN_PYTHON_MINOR" ]; }; then
         echo "  ERROR: Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required."
-        exit 1
+        return 1
     fi
     echo "  OK"
 }
@@ -68,10 +90,13 @@ create_venv() {
     step 3 "Creating virtual environment"
     if [ -d "$VENV_DIR" ]; then
         echo "  Already exists at $VENV_DIR, skipping."
-        return
+        return 0
     fi
     echo "  Creating at $VENV_DIR ..."
-    "$PYTHON_BIN" -m venv "$VENV_DIR"
+    if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
+        echo "  ERROR: failed to create the virtual environment."
+        return 1
+    fi
     echo "  OK"
 }
 
@@ -79,10 +104,13 @@ install_requirements() {
     step 4 "Installing requirements.txt"
     if [ ! -f "$REQUIREMENTS_FILE" ]; then
         echo "  ERROR: $REQUIREMENTS_FILE not found."
-        exit 1
+        return 1
     fi
     echo "  Installing into $VENV_DIR ..."
-    "$(venv_python_path)" -m pip install -q -r "$REQUIREMENTS_FILE"
+    if ! "$(venv_python_path)" -m pip install -q -r "$REQUIREMENTS_FILE"; then
+        echo "  ERROR: pip install failed."
+        return 1
+    fi
     echo "  OK"
 }
 
@@ -95,7 +123,7 @@ check_env_vars() {
         for var in "${REQUIRED_ENV_VARS[@]}"; do
             echo "    $var=..."
         done
-        exit 1
+        return 1
     fi
 
     # Minimal .env parsing here (not python-dotenv): last matching line wins, surrounding
@@ -116,28 +144,38 @@ check_env_vars() {
         joined="$(IFS=,; echo "${missing[*]}")"
         echo ""
         echo "  ERROR: set these in .env: $joined"
-        exit 1
+        return 1
     fi
 }
 
 main() {
     check_os
-    check_python_version
-    create_venv
-    install_requirements
-    check_env_vars
+    check_python_version || return 1
+    create_venv || return 1
+    install_requirements || return 1
+    check_env_vars || return 1
 
-    local activate_cmd
+    local activate_script
     if [ -x "$VENV_DIR/Scripts/python.exe" ]; then
-        activate_cmd=".venv/Scripts/activate"
+        activate_script="$VENV_DIR/Scripts/activate"
     else
-        activate_cmd="source .venv/bin/activate"
+        activate_script="$VENV_DIR/bin/activate"
     fi
 
     echo ""
-    echo "Setup complete. Next steps:"
-    echo "  1. Activate the environment: $activate_cmd"
-    echo "  2. Run the API: uvicorn main:app --reload"
+    if [ "$SOURCED" -eq 1 ]; then
+        echo "Setup complete. Activating the virtual environment in this shell..."
+        # shellcheck disable=SC1090
+        source "$activate_script"
+        echo "  Activated. Next step: uvicorn main:app --reload"
+    else
+        echo "Setup complete. Next steps:"
+        echo "  1. Activate the environment: source \"$activate_script\""
+        echo "  2. Run the API: uvicorn main:app --reload"
+        echo ""
+        echo "  Tip: run this script with 'source ./init.sh' next time to activate it"
+        echo "  automatically once setup finishes."
+    fi
 }
 
 main "$@"

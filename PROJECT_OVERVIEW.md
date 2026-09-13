@@ -48,6 +48,21 @@ Key design choices:
 
 ## Update log
 
+- **2026-09-13** — Made `init.sh` activate the venv it creates when run as `source ./init.sh`,
+  instead of only ever printing manual activation instructions. Root cause of the old limitation:
+  `./init.sh` runs as a subprocess, so anything it exports/activates dies with that subprocess —
+  genuine activation is only possible when the script runs in the caller's own shell process,
+  i.e. when sourced. Added sourced-vs-executed detection (the `(return 0 2>/dev/null)` idiom) and
+  dropped `set -e` in favor of explicit per-step checks that `return 1` (instead of `exit 1`) up
+  through `main`, since `set -e` firing inside a sourced script would otherwise close the user's
+  interactive shell on the first failure instead of just stopping the script. `./init.sh`
+  (executed, not sourced) is unchanged — same 5 steps, same output, same manual-activation
+  instructions at the end. Verified live in git-bash: `source ./init.sh` leaves `VIRTUAL_ENV` set
+  and `python`/`pip` resolving inside `.venv` in the calling shell afterward; `./init.sh` still
+  behaves exactly as before (exit status 0, prints manual activation instructions); and sourcing
+  with `.env` temporarily removed reports the missing-vars error and returns exit status 1
+  without closing the shell (confirmed the shell was still alive and usable right after).
+  Updated `README.md` (leads with `source ./init.sh`) and `CLAUDE.md`'s `init.sh` bullet to match.
 - **2026-09-13** — Fixed enumeration questions ("list all the games mentioned?") against
   `sources/dataset.py` returning only one entry instead of every one. Root cause: `TOP_N`
   keyword-overlap scoring ties heavily when the question's only real keyword is the dataset's
