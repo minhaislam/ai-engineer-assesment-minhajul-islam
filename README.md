@@ -14,17 +14,21 @@ Create a `.env` file in the repo root:
 SUPERHERO_API_TOKEN=your_superhero_api_token
 GEMINI_API_KEY=your_gemini_api_key
 DATASET_PATH=data/football.txt
+GEMINI_MODEL=gemini-3.6-flash
 ```
 
 - `SUPERHERO_API_TOKEN` — from [superheroapi.com](https://superheroapi.com/) (sign in with GitHub).
 - `GEMINI_API_KEY` — from [Google AI Studio](https://aistudio.google.com/).
 - `DATASET_PATH` — path to a text file, one factual sentence per line (not a table/CSV). The
   bundled example, `data/football.txt`, works out of the box.
+- `GEMINI_MODEL` — optional; which Gemini model to call. Leave unset to use the default
+  (`gemini-3.6-flash`), or set it to switch models (e.g. if a model is retired or you hit its
+  quota).
 
 ## 2. Run the setup script
 
 ```bash
-python init.py
+./init.sh
 ```
 
 This checks your OS and Python version, creates a `.venv` virtual environment, installs
@@ -48,18 +52,9 @@ uvicorn main:app --reload
 ## 4. Use it
 
 ```bash
-curl -X POST http://127.0.0.1:8000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "Who won the first FIFA World Cup?"}'
+curl -X POST http://127.0.0.1:8000/ask -H "Content-Type: application/json" -d "{\"question\":\"tell me about flash?\"}"
 ```
 
-```json
-{
-  "answer": "Uruguay won the first FIFA World Cup in 1930.\n\nSources: dataset: football.txt",
-  "sources": ["dataset: football.txt"],
-  "intent": "dataset"
-}
-```
 
 Ask about a superhero instead ("What are Batman's powerstats?") and it routes to the Superhero
 API; ask something that needs both, and it fetches from both sources. Or try it interactively at

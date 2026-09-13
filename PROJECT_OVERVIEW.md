@@ -28,13 +28,15 @@ flowchart TD
 ```
 
 Every dashed arrow is a Gemini call, all going through the single `call_gemini()` entry point.
-`init.py` bootstraps a run from scratch (checks OS/Python version, creates `.venv`, installs
+`init.sh` bootstraps a run from scratch (checks OS/Python version, creates `.venv`, installs
 `requirements.txt`, verifies `.env`) but isn't part of the request flow above.
 
 Key design choices:
 - **Config**: `SUPERHERO_API_TOKEN`, `GEMINI_API_KEY`, `DATASET_PATH` all come from `.env`.
   `DATASET_PATH` can point anywhere on disk (no `data/` folder requirement); missing it fails
-  the app at startup, not on the first request.
+  the app at startup, not on the first request. `GEMINI_MODEL` (also `.env`) is optional,
+  defaulting to `gemini-3.6-flash` in `services/gemini.py` if unset — swapping models is a
+  config edit, not a code change.
 - **Dataset retrieval**: "naive RAG" — the whole file loads into memory once, keyword-overlap
   scoring pulls the top 5 relevant lines, no embeddings/vector DB. Fast, explainable, zero infra.
 - **Conversation memory**: one global history (not per-session — `/ask` has no conversation ID),
@@ -46,6 +48,28 @@ Key design choices:
 
 ## Update log
 
+- **2026-09-13** — Fixed enumeration questions ("list all the games mentioned?") against
+  `sources/dataset.py` returning only one entry instead of every one. Root cause: `TOP_N`
+  keyword-overlap scoring ties heavily when the question's only real keyword is the dataset's
+  own subject word (e.g. "game", present in nearly every line), so ties get cut off at `TOP_N`
+  in file order before covering the whole dataset — reproduced against a real 24-game text
+  dataset where "list all teh game mentioned?" returned only Elden Ring (the first game in the
+  file). This is dataset-content-independent, not specific to this file. Fix: `search_dataset()`
+  now checks the question against `ENUMERATION_WORDS` ("all", "every", "each", "list", "entire")
+  and, if matched, returns the entire dataset as context instead of the top-N ranked lines.
+  Verified live: the enumeration query now lists all 24 games correctly, while a specific query
+  ("Who developed Elden Ring?") still returns narrow, relevant context as before.
+- **2026-09-13** — Made the Gemini model configurable: `services/gemini.py`'s `MODEL_NAME` now
+  reads `GEMINI_MODEL` from `.env`, falling back to `gemini-3.6-flash` if unset, instead of the
+  model name being hardcoded. Motivated by repeatedly needing to swap models mid-build (e.g.
+  `gemini-2.5-flash` retirement, quota exhaustion) — now that's a `.env` edit instead of a code
+  change. Added `GEMINI_MODEL` to `.env`/README as an optional variable (not added to
+  `init.sh`'s required-var check, since the code already has a sensible default).
+- **2026-09-13** — Converted the setup script from `init.py` to `init.sh`: same five steps (OS
+  check, Python version check, `.venv` creation, `requirements.txt` install, `.env` variable
+  verification), reimplemented in bash instead of stdlib Python, per the user's preference for a
+  shell script here. Updated `README.md` and `CLAUDE.md`'s references from `python init.py` to
+  `./init.sh`.
 - **2026-09-13** — Added conversation memory: `core/memory.py` (single global history, last 5
   turns, summarized via Gemini before being fed back in) wired into `core/intent.py`,
   `core/router.py`'s hero-name extraction, and `core/responder.py`. Confirmed with the user: a

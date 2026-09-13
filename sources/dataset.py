@@ -29,6 +29,13 @@ STOPWORDS = {
     "for", "what", "who", "how", "does", "do", "did", "with", "at", "by", "it",
 }
 
+# Signals an enumeration question ("list all X", "every Y", "each Z"). Top-N keyword-overlap
+# retrieval can't answer these regardless of dataset content: a term like "game" or "player"
+# that names the dataset's own subject appears in nearly every line, so it doesn't discriminate
+# between entries, and ties get cut off at TOP_N before covering the whole dataset. Full-dataset
+# context is the only way to enumerate everything, so these questions bypass scoring entirely.
+ENUMERATION_WORDS = {"all", "every", "each", "list", "entire"}
+
 
 @lru_cache(maxsize=1)
 def load_dataset() -> list[str]:
@@ -53,8 +60,15 @@ def _keywords(text: str) -> set[str]:
 
 
 def search_dataset(question: str) -> str:
-    """Return the TOP_N dataset lines most relevant to the question, joined into one string."""
+    """Return dataset lines relevant to the question, joined into one string.
+
+    Enumeration questions ("list all X") return the whole dataset instead of the usual
+    TOP_N-by-overlap lines - see ENUMERATION_WORDS for why ranking can't answer these.
+    """
     question_words = _keywords(question)
+
+    if question_words & ENUMERATION_WORDS:
+        return "\n".join(load_dataset())
 
     scored = []
     for line in load_dataset():

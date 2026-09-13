@@ -23,7 +23,7 @@ question can pull into the prompt.
 ## Commands
 
 ```bash
-python init.py                       # bootstrap: checks OS/Python version, creates .venv,
+./init.sh                            # bootstrap: checks OS/Python version, creates .venv,
                                       # installs requirements.txt, verifies .env variables
 uvicorn main:app --reload            # run the API (POST /ask); docs at /docs
 python sources/superhero.py          # run the Superhero API client's demo call directly
@@ -39,7 +39,7 @@ Request flow: `main.py` → `models/schemas.py` (validation) → `core/router.py
 `core/intent.py` (classify) → `sources/superhero.py` and/or `sources/dataset.py` (retrieve) →
 `core/responder.py` (answer) → back to `main.py`. Full diagram in `PROJECT_OVERVIEW.md`.
 
-- **`init.py`**: stdlib-only bootstrap script (no third-party imports — it has to run before
+- **`init.sh`**: bash-only bootstrap script (no third-party dependencies — it has to run before
   `requirements.txt` is installed). Checks OS + Python version (fails clearly if below 3.10),
   creates `.venv` if missing, installs `requirements.txt` into it via the venv's own
   `python -m pip` (not the system one), and parses `.env` itself (a minimal inline parser, not
@@ -48,7 +48,10 @@ Request flow: `main.py` → `models/schemas.py` (validation) → `core/router.py
   Does not activate the venv or start the server — cross-process activation isn't possible, so
   those remain manual steps (see `README.md`).
 - **Config/secrets**: loaded from a root-level `.env` (gitignored) via `python-dotenv`.
-  `SUPERHERO_API_TOKEN`, `GEMINI_API_KEY`, and `DATASET_PATH` are all required now.
+  `SUPERHERO_API_TOKEN`, `GEMINI_API_KEY`, and `DATASET_PATH` are all required now. `GEMINI_MODEL`
+  is optional — unset falls back to `gemini-3.6-flash` in `services/gemini.py` — so swapping
+  models (e.g. during a quota outage, see "Not yet built" below) is a `.env` edit, not a code
+  change.
 - **`models/schemas.py`**: `AskRequest` (question, 1-500 chars, blank-after-strip rejected) and
   `AskResponse` (`answer: str`, `sources: list[str]`, `intent: str`) — the contract everything
   else builds on.
@@ -120,12 +123,19 @@ Request flow: `main.py` → `models/schemas.py` (validation) → `core/router.py
   overlap with the question (a small stopword list — "the", "is", "what", etc. — is stripped
   first so common words don't inflate every line's score) and returns the top 5 lines joined into
   one string, or `""` if nothing overlaps. Plain keyword matching, no embeddings/vector DB, per
-  the "Dataset retrieval" decision below.
+  the "Dataset retrieval" decision below. Exception: a question containing an enumeration word
+  (`ENUMERATION_WORDS` — "all", "every", "each", "list", "entire") skips scoring entirely and
+  returns the whole dataset, since top-N-by-overlap can't answer "list all X" against any
+  dataset — a word naming the dataset's own subject (e.g. "game") appears in nearly every line,
+  so it doesn't discriminate between entries, and ties get cut off at `TOP_N` before covering
+  everything.
 - **`services/gemini.py`**: the only file that knows Gemini exists. `_get_client()` builds the
   `google.genai.Client` once (`@lru_cache`) instead of per request. `call_gemini(system_prompt,
   user_message) -> str` is the single entry point every other module should use — swapping LLM
-  providers later means changing only this file. Uses model `gemini-3.6-flash` (`gemini-2.5-flash`
-  was retired for new users mid-build; keep an eye on Google's model deprecation notices).
+  providers later means changing only this file. Model name comes from `GEMINI_MODEL` in `.env`,
+  defaulting to `gemini-3.6-flash` if unset (`gemini-2.5-flash` was retired for new users
+  mid-build; keep an eye on Google's model deprecation notices) — makes switching models (e.g.
+  to work around a rate limit) a config change, not a code change.
 
 ## Design decisions (implemented)
 
