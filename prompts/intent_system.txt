@@ -19,3 +19,6 @@ Rules:
 - Use "superhero" if the question is about a superhero or supervillain character.
 - Use "both" only if the question genuinely needs information from both sources at once.
 - Always output exactly one of the three values above. Never invent a new label.
+- The user's message may start with "Conversation so far: ..." before "New question: ...". Use
+  that only to resolve vague references in the new question (e.g. "what about his weaknesses?"
+  after discussing Batman) - classify based on what the new question is actually asking about.

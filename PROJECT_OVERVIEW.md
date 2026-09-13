@@ -6,57 +6,121 @@ API, routing via LLM classification, with sources cited in every response. Asses
 
 ## Current features
 
-The full pipeline is wired up end-to-end:
+```mermaid
+flowchart TD
+    A["POST /ask"] --> B["models/schemas.py<br/>validate AskRequest"]
+    B --> C["core/router.py<br/>handle_question()"]
+    C --> D["core/memory.py<br/>get_summary()<br/>last 5 turns, summarized"]
+    D --> E["core/intent.py<br/>classify_intent()"]
+    E -- dataset --> F["sources/dataset.py<br/>search_dataset()"]
+    E -- superhero --> G["sources/superhero.py<br/>extract name(s) + search_hero()"]
+    E -- both --> F
+    E -- both --> G
+    F --> H["core/responder.py<br/>generate_answer()"]
+    G --> H
+    H --> I["core/memory.py<br/>add_turn()"]
+    I --> J["AskResponse"] --> K["main.py returns to client"]
 
+    L["services/gemini.py<br/>call_gemini()"] -.-> D
+    L -.-> E
+    L -.-> G
+    L -.-> H
 ```
-main.py (POST /ask)
-  -> models/schemas.py validates the request (AskRequest)
-  -> core/router.py: handle_question(question)
-       -> core/intent.py: classify_intent(question) -> "dataset" | "superhero" | "both"
-       -> calls the matching source(s):
-            sources/superhero.py  (extract hero name(s) via Gemini, then search_hero + build_hero_context)
-            sources/dataset.py    (search_dataset: keyword overlap)
-          "both" runs the two concurrently (asyncio.gather + asyncio.to_thread)
-       -> core/responder.py: generate_answer(question, context, sources) -> AskResponse
-       -> router.py sets response.intent before returning
-  -> main.py returns the AskResponse (502 on any failure, with the real reason)
-```
 
-- `models/schemas.py`: `AskRequest` (question, 1-500 chars, rejects blank-after-strip via a
-  `field_validator`) and `AskResponse` (`answer: str`, `sources: list[str]`, `intent: str`).
-- `prompts/intent_system.txt` and `prompts/answer_system.txt`: system prompts as text files, not
-  Python strings, so they're editable without a code change or restart.
-- `core/intent.py`: one Gemini call, parses `{"intent": "..."}` JSON, falls back to `"both"` on
-  an unparseable reply instead of crashing. The prompt doesn't hardcode the dataset's topic —
-  it shows the classifier a live sample of `sources.dataset.load_dataset()` (first 5 lines,
-  substituted into the `<<DATASET_SAMPLE>>` placeholder in `prompts/intent_system.txt`), so
-  swapping `data/football.txt` for a different file doesn't require editing the prompt by hand.
-- `core/router.py`: the orchestrator. Superhero questions get an extra inline Gemini call (hero
-  name extraction from free text — same design validated in `scripts/test_superhero_gemini.py`)
-  before `search_hero()` can run.
-- `core/responder.py`: builds the final answer, telling Gemini to use *only* the given context,
-  plus a `Sources:` line at the end of the answer text itself, in addition to the structured
-  `sources` list.
-- Superhero API client (`sources/superhero.py`) and local dataset (`sources/dataset.py` +
-  `data/football.txt`) — see their entries further down for how each works; both are now called
-  from `main.py` via the router instead of standalone.
-- Gemini LLM client (`services/gemini.py`) — unchanged, still the only file that knows Gemini
-  exists.
-- Manual test script (`scripts/test_superhero_gemini.py`) — the design prototype for the
-  superhero half of `core/router.py`; still useful standalone for testing just that piece.
+Every dashed arrow is a Gemini call, all going through the single `call_gemini()` entry point.
+`init.py` bootstraps a run from scratch (checks OS/Python version, creates `.venv`, installs
+`requirements.txt`, verifies `.env`) but isn't part of the request flow above.
 
-## Not yet built / known limitations
-
-- Tests (routing, error paths) — the assessment's explicit "sensible error handling" bar wants
-  at least empty-input and superhero-not-found covered.
-- No cap on fan-out: a question naming many heroes, or an ambiguous name with many API matches,
-  grows the prompt with no limit.
-- `gemini-3.6-flash`'s free tier is 20 requests/day, and each question costs 2-3 calls (classify,
-  optional hero extraction, answer) — easy to exhaust during a test session. See the update-log
-  entry below.
+Key design choices:
+- **Config**: `SUPERHERO_API_TOKEN`, `GEMINI_API_KEY`, `DATASET_PATH` all come from `.env`.
+  `DATASET_PATH` can point anywhere on disk (no `data/` folder requirement); missing it fails
+  the app at startup, not on the first request.
+- **Dataset retrieval**: "naive RAG" — the whole file loads into memory once, keyword-overlap
+  scoring pulls the top 5 relevant lines, no embeddings/vector DB. Fast, explainable, zero infra.
+- **Conversation memory**: one global history (not per-session — `/ask` has no conversation ID),
+  last 5 turns, summarized via Gemini before reuse to keep prompt size bounded. Pure in-process
+  state, so it resets on every restart automatically.
+- **Errors**: `SuperheroNotFoundError`/`SuperheroAPIError` degrade to context text instead of
+  crashing; any unhandled exception in the pipeline becomes a `502` from `main.py`; request
+  validation failures are FastAPI's standard `422`.
 
 ## Update log
 
+- **2026-09-13** — Added conversation memory: `core/memory.py` (single global history, last 5
+  turns, summarized via Gemini before being fed back in) wired into `core/intent.py`,
+  `core/router.py`'s hero-name extraction, and `core/responder.py`. Confirmed with the user: a
+  single global history (not per-session) is fine for now, and history should be summarized
+  (not injected raw) specifically to keep prompt size bounded — flagged that this trades prompt
+  size for call count (one more Gemini call per question once history exists), which matters
+  given the free-tier quota. Verified live end-to-end with a real follow-up: "Tell me about
+  Batman" → correct answer; "What about his weaknesses?" → correctly still classified as
+  `superhero`, correctly resolved "his" to Batman during hero-name extraction (re-fetched Batman
+  context, not stale data), and honestly said the context has no weakness info rather than
+  hallucinating one. Confirmed a fresh process starts with empty history (`len(memory._history)
+  == 0`) and no state file anywhere — memory resets automatically on every restart, no explicit
+  "refresh" needed since nothing is ever persisted. Along the way, hit two unrelated live-API
+  issues while testing: `gemini-3.6-flash` now shows a 5-requests/**minute** limit (not just the
+  20/day one hit earlier) — worked around by testing via `gemini-3.5-flash-lite` instead; and a
+  transient Superhero API connection reset, which the existing `SuperheroAPIError` handling
+  degraded from gracefully (confirmed by retrying — the API itself was fine seconds later).
+- **2026-09-13** — Added `init.py` (stdlib-only setup script: OS/Python version check, `.venv`
+  creation, `requirements.txt` install into that venv, `.env` variable verification) and rewrote
+  `README.md` to be short (set env vars -> run `init.py` -> activate + `uvicorn` -> example
+  `curl`), per the assessment's own README guidance. Verified live: ran `python init.py` for
+  real (not just read through it) — it created `.venv`, installed all 5 dependencies into it
+  (confirmed via `pip list` inside that venv), correctly reported all 3 env vars as present, and
+  printed the right activation command for Windows. Also confirmed the app's own code
+  (`sources.dataset.search_dataset`) runs correctly using the new venv's Python interpreter.
+  `.venv/` was already covered by `.gitignore` (existing `.venv/` pattern), no change needed
+  there.
+- **2026-09-13** — Deleted `scripts/test_superhero_gemini.py` and the `scripts/` folder. It was
+  the design prototype for the superhero half of `core/router.py` (hero-name extraction ->
+  lookup -> answer); `core/router.py` now fully reimplements and supersedes that logic in
+  production, verified end-to-end, so the standalone copy was redundant and risked drifting out
+  of sync. Confirmed nothing in `main.py`/`core/`/`sources/`/`services/`/`init.py` imported from
+  it before deleting. The design history stays in the two 2026-09-12 entries below, unchanged.
+- **2026-09-13** — User pointed `DATASET_PATH` at a real tab-separated game-sales file and asked
+  "What is the most sold game?" — got a non-answer citing "football facts" as the source. Root
+  cause was two things: (1) a real bug — `core/router.py`'s `_get_dataset_context` hardcoded the
+  source label as `"dataset: football facts"` regardless of `DATASET_PATH`; fixed to derive it
+  from the actual filename (`f"dataset: {Path(DATASET_PATH).name}"`). (2) A design/scope
+  mismatch, not a bug: `search_dataset()` retrieves whole lines by keyword overlap, so it matched
+  only the file's header/title lines (they contained "game"/"sold" as words; `units_sold_million`
+  splits into `units`/`sold`/`million`), never any actual data row — and even a matched row
+  couldn't answer an aggregate question like "the most sold" (max across 30 rows), since no
+  single line can. Confirmed with the user: `sources/dataset.py` stays prose-only by design (one
+  factual sentence per line, like `football.txt`) rather than adding real tabular/aggregate
+  support — documented the expected format in the module docstring, README, and CLAUDE.md so
+  this doesn't surprise someone again. A tabular dataset would need to be rewritten as sentences
+  first to work with this retrieval approach.
+- **2026-09-13** — Made the dataset location configurable instead of hardcoded: `sources/dataset.py`
+  now reads `DATASET_PATH` from the environment (added to `.env`, pointing at
+  `data/football.txt`) rather than assuming a `data/` directory next to the code. Confirmed with
+  the user that a missing `DATASET_PATH` should fail fast rather than silently fall back to
+  anything. Verified live: (1) normal operation via `.env` still works; (2) with `DATASET_PATH`
+  unset, `load_dataset()` raises a clear `RuntimeError`, and the FastAPI app itself fails at
+  startup (via `TestClient`, which triggers the `lifespan` handler) rather than on the first
+  request; (3) pointed `DATASET_PATH` at a file completely outside the repo
+  (`C:/temp_dataset_test/my_custom_dataset.txt`) and confirmed `search_dataset()` loads and
+  searches it correctly — proving no dependency on the `data/` directory remains.
+- **2026-09-13** — Added a FastAPI `lifespan` handler to `main.py` that calls
+  `sources.dataset.load_dataset()` at startup, so the dataset loads into memory once when the
+  app boots rather than lazily on the first request — confirming the "naive RAG" design
+  (in-memory dataset + keyword search + context stuffing, chosen deliberately over real RAG
+  since the dataset is small enough that retrieval quality isn't the bottleneck). Verified with
+  `TestClient` (which triggers the lifespan) that `load_dataset.cache_info()` shows the cache
+  already populated after startup and before any `/ask` request is made.
+- **2026-09-13** — Made file paths in `sources/dataset.py`, `core/intent.py`, and
+  `core/responder.py` invocation-location-independent: each now anchors to
+  `Path(__file__).resolve().parent.parent` (the repo root) instead of a plain relative string
+  like `"data/football.txt"`, which only resolved correctly if the process's cwd happened to be
+  the repo root. This isn't an OS-specific fix (forward slashes already worked fine on Windows)
+  — it's a cwd-independence fix, needed since the assessment says "we should be able to clone and
+  run it" and different OSes/IDEs/invocation methods (an IDE's per-file "Run" button, a script run
+  from a subdirectory) don't all default cwd to the repo root. Verified live: ran
+  `sources.dataset.search_dataset()` and `core.intent.classify_intent()` with cwd changed to
+  `scripts/` — both still found their files at the correct absolute path and returned correct
+  results.
 - **2026-09-12** — Fixed a coupling issue in `prompts/intent_system.txt`: it used to hardcode
   "football (soccer) facts" as the dataset's topic, which would silently go stale if
   `data/football.txt` were ever swapped for a different dataset. `core/intent.py` now injects a

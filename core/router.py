@@ -1,12 +1,14 @@
 """The orchestrator: classify the question, fetch context from the right source(s), answer it."""
 
 import asyncio
+from pathlib import Path
 
+from core import memory
 from core.intent import classify_intent
 from core.responder import generate_answer
 from models.schemas import AskResponse
 from services.gemini import call_gemini
-from sources.dataset import search_dataset
+from sources.dataset import DATASET_PATH, search_dataset
 from sources.superhero import (
     SuperheroAPIError,
     SuperheroNotFoundError,
@@ -19,14 +21,17 @@ from sources.superhero import (
 HERO_EXTRACT_SYSTEM_PROMPT = (
     "Identify every superhero or supervillain name mentioned in the user's question. "
     "Reply with ONLY a comma-separated list of names, nothing else. "
-    "If no hero/villain name is mentioned, reply with exactly: NONE"
+    "If no hero/villain name is mentioned, reply with exactly: NONE. "
+    "The message may start with 'Conversation so far: ...' before 'New question: ...' - use "
+    "that only to resolve a vague reference (e.g. 'his weaknesses' meaning a hero named earlier)."
 )
 
 
-def _get_superhero_context(question: str) -> tuple[str, list[str]]:
+def _get_superhero_context(question: str, history: str = "") -> tuple[str, list[str]]:
     """Extract hero name(s) from the question, look each up, and combine their context.
     Returns (context_text, source_labels) - both empty if no hero could be identified."""
-    reply = call_gemini(system_prompt=HERO_EXTRACT_SYSTEM_PROMPT, user_message=question).strip()
+    user_message = f"Conversation so far: {history}\n\nNew question: {question}" if history else question
+    reply = call_gemini(system_prompt=HERO_EXTRACT_SYSTEM_PROMPT, user_message=user_message).strip()
     names = [] if reply.upper() == "NONE" else [n.strip() for n in reply.split(",") if n.strip()]
 
     sections = []
@@ -51,19 +56,24 @@ def _get_superhero_context(question: str) -> tuple[str, list[str]]:
 def _get_dataset_context(question: str) -> tuple[str, list[str]]:
     """Keyword-search the local dataset. Returns (context_text, source_labels)."""
     context = search_dataset(question)
-    return context, (["dataset: football facts"] if context else [])
+    label = f"dataset: {Path(DATASET_PATH).name}" if DATASET_PATH else "dataset"
+    return context, ([label] if context else [])
 
 
 async def handle_question(question: str) -> AskResponse:
     """Classify the question, gather context from the source(s) that intent calls for,
-    then answer it. "both" fetches from superhero + dataset concurrently."""
-    intent = classify_intent(question)
+    then answer it. "both" fetches from superhero + dataset concurrently.
+
+    Also maintains a short in-memory conversation history (see core/memory.py) so follow-up
+    questions ("what about his weaknesses?") can be understood and answered coherently."""
+    history = await asyncio.to_thread(memory.get_summary)
+    intent = classify_intent(question, history)
 
     context_parts: list[str] = []
     sources: list[str] = []
 
     if intent == "superhero":
-        context, labels = await asyncio.to_thread(_get_superhero_context, question)
+        context, labels = await asyncio.to_thread(_get_superhero_context, question, history)
         context_parts.append(context)
         sources.extend(labels)
 
@@ -74,7 +84,7 @@ async def handle_question(question: str) -> AskResponse:
 
     else:  # "both"
         (hero_context, hero_labels), (dataset_context, dataset_labels) = await asyncio.gather(
-            asyncio.to_thread(_get_superhero_context, question),
+            asyncio.to_thread(_get_superhero_context, question, history),
             asyncio.to_thread(_get_dataset_context, question),
         )
         context_parts.extend([hero_context, dataset_context])
@@ -85,6 +95,10 @@ async def handle_question(question: str) -> AskResponse:
     if not combined_context:
         combined_context = "No relevant information was found for this question."
 
-    response = generate_answer(question=question, context=combined_context, sources=sources)
+    response = generate_answer(
+        question=question, context=combined_context, sources=sources, history=history
+    )
     response.intent = intent
+
+    memory.add_turn(question, response.answer)
     return response
